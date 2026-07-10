@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM node:22-slim
 
 # Instala o Google Chrome estável (o Puppeteer precisa de um navegador de verdade)
 RUN apt-get update && apt-get install -y wget gnupg \
