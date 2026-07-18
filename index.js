@@ -4,9 +4,6 @@ const { Client, LocalAuth, MessageMedia } = pkg
 import qrcodeTerminal from 'qrcode-terminal'
 import QRCode from 'qrcode'
 import { createClient } from '@supabase/supabase-js'
-import express from 'express'
-import fs from 'fs'
-import path from 'path'
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
 const ACCOUNT_ID = process.env.ACCOUNT_ID
@@ -15,33 +12,6 @@ if (!ACCOUNT_ID) {
   console.error('❌ Faltou definir ACCOUNT_ID no arquivo .env. Veja o .env.example.')
   process.exit(1)
 }
-
-// Remove travas do Chrome que sobram quando o container é reiniciado sem fechar
-// o navegador direito (comum no Railway/Docker com volume persistente) — sem isso,
-// o Chrome se recusa a abrir achando que "outro computador" ainda está usando o perfil.
-function cleanChromeLocks(dataPath) {
-  function walk(dir) {
-    if (!fs.existsSync(dir)) return
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name)
-      if (entry.isDirectory()) walk(full)
-      else if (/^Singleton(Lock|Socket|Cookie)$/.test(entry.name)) {
-        try {
-          fs.unlinkSync(full)
-          console.log(`🔓 Trava antiga removida: ${full}`)
-        } catch {}
-      }
-    }
-  }
-  walk(dataPath)
-}
-cleanChromeLocks('./.wwebjs_auth')
-
-// Servidor minimo so pra responder o health check do Railway (ele precisa ver algo
-// respondendo numa porta HTTP pra considerar o servico "no ar"). Nao faz nada alem disso.
-const app = express()
-app.get('/', (req, res) => res.send('Conector Sinal rodando OK'))
-app.listen(process.env.PORT || 3000, () => console.log(`Health check ouvindo na porta ${process.env.PORT || 3000}`))
 
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
@@ -53,7 +23,6 @@ const client = new Client({
   },
   puppeteer: {
     headless: true,
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -86,16 +55,38 @@ client.on('ready', async () => {
     connected_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   })
-  await syncLabels()
-  await syncHistory()
-  watchOutbox()
-  watchSyncRequests()
-  watchCampaigns()
-  watchLabelSyncRequests()
+
+  // cada etapa roda isolada: se uma falhar, não impede as outras de funcionarem
+  try {
+    await syncLabels()
+  } catch (err) {
+    console.error('Erro em syncLabels:', err.message)
+  }
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 4000)) // dá um tempo pra página do WhatsApp terminar de carregar
+    await syncHistory()
+  } catch (err) {
+    console.error('Erro em syncHistory:', err.message)
+  }
+  try {
+    watchOutbox()
+  } catch (err) {
+    console.error('Erro ao iniciar watchOutbox:', err.message)
+  }
+  try {
+    watchSyncRequests()
+  } catch (err) {
+    console.error('Erro ao iniciar watchSyncRequests:', err.message)
+  }
+  try {
+    watchCampaigns()
+  } catch (err) {
+    console.error('Erro ao iniciar watchCampaigns:', err.message)
+  }
 
   setInterval(() => {
     console.log('🔄 Sincronização automática periódica...')
-    syncHistory()
+    syncHistory().catch((err) => console.error('Erro na sincronização periódica:', err.message))
   }, 10 * 60 * 1000)
 
   startWatchdog()
@@ -125,14 +116,7 @@ function startWatchdog() {
 async function syncLabels() {
   try {
     const labels = await client.getLabels()
-    if (!labels?.length) return
-    console.log(`🏷️  ${labels.length} etiqueta(s) do WhatsApp Business encontrada(s).`)
-    for (const label of labels) {
-      await supabase.from('whatsapp_labels').upsert(
-        { account_id: ACCOUNT_ID, wa_label_id: label.id, name: label.name, color: String(label.hexColor || label.colorIndex || ''), updated_at: new Date().toISOString() },
-        { onConflict: 'account_id,wa_label_id' }
-      )
-    }
+    if (labels?.length) console.log(`🏷️  ${labels.length} etiqueta(s) do WhatsApp Business encontrada(s).`)
   } catch {
     // conta comum (não é WhatsApp Business), sem etiquetas — segue o baile normalmente
   }
@@ -141,12 +125,9 @@ async function syncLabels() {
 async function getChatLabelNames(chat) {
   try {
     const labels = await chat.getLabels()
-    return {
-      names: (labels || []).map((l) => l.name).filter(Boolean),
-      ids: (labels || []).map((l) => l.id).filter(Boolean),
-    }
+    return (labels || []).map((l) => l.name).filter(Boolean)
   } catch {
-    return { names: [], ids: [] }
+    return []
   }
 }
 
@@ -223,42 +204,9 @@ function watchSyncRequests() {
     .channel('sync-requests-watch')
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'sync_requests', filter: `account_id=eq.${ACCOUNT_ID}` }, () => {
       console.log('🔄 Sincronização manual solicitada pelo site...')
-      syncHistory()
+      syncHistory().catch((err) => console.error('Erro na sincronização manual:', err.message))
     })
     .subscribe()
-}
-
-// ---------- Aplica no WhatsApp de verdade as etiquetas marcadas/desmarcadas no CRM ----------
-function watchLabelSyncRequests() {
-  processPendingLabelRequests()
-
-  supabase
-    .channel('label-sync-watch')
-    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'label_sync_requests', filter: `account_id=eq.${ACCOUNT_ID}` }, (payload) => {
-      applyLabelChange(payload.new)
-    })
-    .subscribe()
-}
-
-async function processPendingLabelRequests() {
-  const { data: pending } = await supabase.from('label_sync_requests').select('*').eq('account_id', ACCOUNT_ID).eq('processed', false)
-  for (const req of pending || []) await applyLabelChange(req)
-}
-
-async function applyLabelChange(req) {
-  try {
-    const { data: contact } = await supabase.from('contacts').select('whatsapp_id').eq('id', req.contact_id).single()
-    if (!contact?.whatsapp_id) throw new Error('Contato sem whatsapp_id')
-
-    const chat = await client.getChatById(contact.whatsapp_id)
-    await chat.changeLabels(req.label_ids)
-
-    console.log(`🏷️  Etiquetas atualizadas no WhatsApp pra ${contact.whatsapp_id}`)
-    await supabase.from('label_sync_requests').update({ processed: true }).eq('id', req.id)
-  } catch (err) {
-    console.error('Erro ao aplicar etiqueta no WhatsApp (só funciona em contas WhatsApp Business):', err.message)
-    await supabase.from('label_sync_requests').update({ processed: true }).eq('id', req.id)
-  }
 }
 
 // ---------- Sincronização inicial: todos os contatos e conversas existentes ----------
@@ -274,9 +222,9 @@ async function syncHistory() {
       const contact = await chat.getContact()
       const contactRow = await upsertContact(contact)
 
-      const labelData = await getChatLabelNames(chat)
-      if (labelData.names.length) {
-        await supabase.from('contacts').update({ wa_labels: labelData.names, wa_label_ids: labelData.ids }).eq('id', contactRow.id)
+      const labelNames = await getChatLabelNames(chat)
+      if (labelNames.length) {
+        await supabase.from('contacts').update({ wa_labels: labelNames }).eq('id', contactRow.id)
       }
 
       const history = await chat.fetchMessages({ limit: 60 })
@@ -591,8 +539,10 @@ async function sendOutboxRow(row) {
     if (!contact?.whatsapp_id) throw new Error('Contato sem whatsapp_id')
 
     if (row.media_url) {
+      // mensagem com mídia (ex: áudio gravado no CRM) — baixa da URL pública e manda como mídia real
       const media = await MessageMedia.fromUrl(row.media_url, { unsafeMime: true })
-      await client.sendMessage(contact.whatsapp_id, media, { caption: row.content || undefined })
+      const isAudio = row.message_type === 'audio' || row.message_type === 'ptt'
+      await client.sendMessage(contact.whatsapp_id, media, isAudio ? { sendAudioAsVoice: true } : {})
     } else {
       await client.sendMessage(contact.whatsapp_id, row.content)
     }
