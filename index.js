@@ -30,7 +30,7 @@ const client = new Client({
       '--disable-gpu',
       '--disable-extensions',
     ],
-    protocolTimeout: 180000, // 3 minutos, evita travar em computadores mais lentos
+    protocolTimeout: 600000, // 10 minutos, evita travar em computadores mais lentos
   },
 })
 
@@ -230,7 +230,9 @@ async function syncHistory() {
       const history = await chat.fetchMessages({ limit: 60 })
       for (const msg of history) {
         if (!msg.body && !msg.hasMedia) continue
-        const mediaUrl = msg.hasMedia ? await downloadAndStoreMedia(msg) : null
+        // não baixa mídia na sincronização inicial (muitas conversas = trava o navegador interno);
+        // mídia de mensagens novas continua sendo baixada normalmente pelo listener de mensagens
+        const mediaUrl = null
         await supabase
           .from('messages')
           .upsert(
