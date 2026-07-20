@@ -60,10 +60,10 @@ client.on('ready', async () => {
     console.error('Erro em syncLabels:', err.message)
   }
   try {
-    await new Promise((resolve) => setTimeout(resolve, 4000)) // dá um tempo pra página do WhatsApp terminar de carregar
+    await new Promise((resolve) => setTimeout(resolve, 15000)) // dá mais tempo pra página do WhatsApp terminar de carregar
     await syncHistory()
   } catch (err) {
-    console.error('Erro em syncHistory:', err.message)
+    console.error('Erro em syncHistory:', err.stack || err)
   }
   try {
     watchOutbox()
@@ -209,7 +209,20 @@ function watchSyncRequests() {
 // ---------- Sincronização inicial: todos os contatos e conversas existentes ----------
 async function syncHistory() {
   console.log('🔄 Sincronizando contatos e conversas existentes... isso pode levar alguns minutos na primeira vez.')
-  const chats = await client.getChats()
+
+  // o Store interno do WhatsApp às vezes não está pronto assim que conecta;
+  // tenta de novo algumas vezes indez de desistir na primeira falha
+  let chats
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      chats = await client.getChats()
+      break
+    } catch (err) {
+      console.error(`Tentativa ${attempt}/5 de getChats falhou:`, err?.message, '| tipo:', typeof err, '| detalhes:', JSON.stringify(err, Object.getOwnPropertyNames(err || {})))
+      if (attempt === 5) throw err
+      await new Promise((resolve) => setTimeout(resolve, attempt * 5000))
+    }
+  }
   let done = 0
 
   for (const chat of chats) {
@@ -224,7 +237,7 @@ async function syncHistory() {
         await supabase.from('contacts').update({ wa_labels: labelNames }).eq('id', contactRow.id)
       }
 
-      const history = await chat.fetchMessages({ limit: 60 })
+      const history = await chat.fetchMessages({ limit: 30 })
       for (const msg of history) {
         if (!msg.body && !msg.hasMedia) continue
         // não baixa mídia na sincronização inicial (muitas conversas = trava o navegador interno);
@@ -258,7 +271,7 @@ async function syncHistory() {
 
       done++
       if (done % 10 === 0) console.log(`   ...${done}/${chats.length} conversas sincronizadas`)
-      await new Promise((resolve) => setTimeout(resolve, 200))
+      await new Promise((resolve) => setTimeout(resolve, 600))
     } catch (err) {
       console.error('Erro sincronizando uma conversa:', err.message)
     }
