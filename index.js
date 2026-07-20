@@ -313,10 +313,12 @@ client.on('message_create', async (msg) => {
   try {
     if (msg.from === 'status@broadcast' || msg.to === 'status@broadcast') return
 
-    const chat = await msg.getChat()
-    if (chat.isGroup) return // MVP: ignora grupos, só conversas 1:1
+    // evita msg.getChat(), que está instável em algumas versões do WhatsApp Web;
+    // o id do grupo/contato já vem direto na própria mensagem
+    const counterpartId = msg.fromMe ? msg.to : msg.from
+    if (counterpartId.endsWith('@g.us')) return // MVP: ignora grupos, só conversas 1:1
 
-    const contact = msg.fromMe ? await chat.getContact() : await msg.getContact()
+    const contact = await client.getContactById(counterpartId)
     const contactRow = await upsertContact(contact)
 
     const mediaUrl = msg.hasMedia ? await downloadAndStoreMedia(msg) : null
