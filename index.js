@@ -15,8 +15,9 @@ if (!ACCOUNT_ID) {
 
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
-  // usa a versão mais recente do WhatsApp Web (a versão fixa antiga estava
-  // causando erros internos por estar desatualizada)
+  // sem cache de versão: sempre busca a página atual do WhatsApp Web,
+  // evita reaproveitar em disco uma versão antiga já salva
+  webVersionCache: { type: 'none' },
   puppeteer: {
     headless: true,
     args: [
