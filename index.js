@@ -15,12 +15,8 @@ if (!ACCOUNT_ID) {
 
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
-  // fixa numa versão estável do WhatsApp Web: a mais recente tem um bug conhecido
-  // que impede a conexão (o QR fica se renovando sem nunca conectar)
-  webVersionCache: {
-    type: 'remote',
-    remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
-  },
+  // usa a versão mais recente do WhatsApp Web (a versão fixa antiga estava
+  // causando erros internos por estar desatualizada)
   puppeteer: {
     headless: true,
     args: [
