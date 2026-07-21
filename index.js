@@ -372,6 +372,33 @@ function isPlausiblePhone(digits) {
   return digits && digits.length >= 10 && digits.length <= 13
 }
 
+async function downloadAndStoreAvatar(contact, whatsapp_id) {
+  try {
+    const tempUrl = await contact.getProfilePicUrl()
+    if (!tempUrl) return null
+
+    const res = await fetch(tempUrl)
+    if (!res.ok) return null
+    const buffer = Buffer.from(await res.arrayBuffer())
+
+    // caminho fixo por contato: sempre sobrescreve a mesma foto, sem acumular lixo no storage
+    const path = `avatars/${ACCOUNT_ID}/${whatsapp_id.replace(/[^a-zA-Z0-9_-]/g, '_')}.jpg`
+    const { error } = await supabase.storage.from('media').upload(path, buffer, {
+      contentType: 'image/jpeg',
+      upsert: true,
+    })
+    if (error) {
+      console.error('Erro ao salvar foto de perfil:', error.message)
+      return null
+    }
+    const { data: pub } = supabase.storage.from('media').getPublicUrl(path)
+    // adiciona um carimbo de tempo pra forçar o navegador a buscar a versão nova quando a foto mudar
+    return `${pub.publicUrl}?t=${Date.now()}`
+  } catch {
+    return null
+  }
+}
+
 async function upsertContact(contact) {
   const whatsapp_id = contact.id._serialized
   const isLid = whatsapp_id.endsWith('@lid') // novo sistema de identificação do WhatsApp, sem número real visível
@@ -382,14 +409,14 @@ async function upsertContact(contact) {
   }
   const name = contact.pushname || contact.name || (phone ? phone : null) || 'Contato sem nome'
 
-  let avatar_url = null
-  try {
-    avatar_url = await contact.getProfilePicUrl()
-  } catch {
-    avatar_url = null
+  const { data: existing } = await supabase.from('contacts').select('*').eq('whatsapp_id', whatsapp_id).maybeSingle()
+
+  // só baixa a foto de novo se ainda não tiver uma salva (evita baixar tudo de novo a cada sincronização)
+  let avatar_url = existing?.avatar_url || null
+  if (!avatar_url) {
+    avatar_url = await downloadAndStoreAvatar(contact, whatsapp_id)
   }
 
-  const { data: existing } = await supabase.from('contacts').select('*').eq('whatsapp_id', whatsapp_id).maybeSingle()
   if (existing) {
     const updates = {}
     if (name && existing.name !== name) updates.name = name
