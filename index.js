@@ -411,10 +411,11 @@ async function upsertContact(contact) {
 
   const { data: existing } = await supabase.from('contacts').select('*').eq('whatsapp_id', whatsapp_id).maybeSingle()
 
-  // só baixa a foto de novo se ainda não tiver uma salva (evita baixar tudo de novo a cada sincronização)
-  let avatar_url = existing?.avatar_url || null
-  if (!avatar_url) {
-    avatar_url = await downloadAndStoreAvatar(contact, whatsapp_id)
+  // a foto NUNCA atrasa o salvamento da mensagem: se ainda não tem, baixa depois em segundo plano
+  if (!existing?.avatar_url) {
+    downloadAndStoreAvatar(contact, whatsapp_id).then((avatar_url) => {
+      if (avatar_url) supabase.from('contacts').update({ avatar_url }).eq('whatsapp_id', whatsapp_id).then(() => {})
+    })
   }
 
   if (existing) {
@@ -426,7 +427,6 @@ async function upsertContact(contact) {
     } else if (existing.phone !== phone) {
       updates.phone = phone
     }
-    if (avatar_url && existing.avatar_url !== avatar_url) updates.avatar_url = avatar_url
     if (Object.keys(updates).length) {
       const { data: updated } = await supabase.from('contacts').update(updates).eq('id', existing.id).select().single()
       return updated || existing
@@ -436,7 +436,7 @@ async function upsertContact(contact) {
 
   const { data: created } = await supabase
     .from('contacts')
-    .insert({ whatsapp_id, phone, name, avatar_url, account_id: ACCOUNT_ID })
+    .insert({ whatsapp_id, phone, name, account_id: ACCOUNT_ID })
     .select()
     .single()
   return created
