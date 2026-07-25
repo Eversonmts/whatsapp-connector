@@ -15,9 +15,9 @@ if (!ACCOUNT_ID) {
 
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
-  // sem cache de versão: sempre busca a página atual do WhatsApp Web,
-  // evita reaproveitar em disco uma versão antiga já salva
-  webVersionCache: { type: 'none' },
+  // cache local: busca a versão atual na primeira vez e reaproveita depois.
+  // 'none' (sem cache nenhum) causava recarregamentos no meio da inicialização e derrubava o conector.
+  webVersionCache: { type: 'local' },
   puppeteer: {
     headless: true,
     args: [
@@ -607,4 +607,14 @@ async function sendOutboxRow(row) {
   }
 }
 
-client.initialize()
+client.initialize().catch((err) => {
+  console.error('❌ Falha ao inicializar o conector:', err.message)
+  console.error('Reiniciando em 10 segundos...')
+  setTimeout(() => process.exit(1), 10000) // deixa o Railway reiniciar o container do zero
+})
+
+process.on('unhandledRejection', (err) => {
+  console.error('❌ Erro não tratado:', err?.message || err)
+  console.error('Reiniciando em 10 segundos...')
+  setTimeout(() => process.exit(1), 10000)
+})
