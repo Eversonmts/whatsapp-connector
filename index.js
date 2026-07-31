@@ -206,30 +206,46 @@ function watchSyncRequests() {
     .subscribe()
 }
 
+// Roda uma promise com um limite de tempo próprio; se estourar, rejeita sem
+// deixar a chamada trava o resto da sincronização (client.getChats() travava
+// justamente por não ter esse limite quando há muitas conversas).
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout (${ms}ms) em ${label}`)), ms)),
+  ])
+}
+
 // ---------- Sincronização inicial: todos os contatos e conversas existentes ----------
 async function syncHistory() {
   console.log('🔄 Sincronizando contatos e conversas existentes... isso pode levar alguns minutos na primeira vez.')
 
-  // o Store interno do WhatsApp às vezes não está pronto assim que conecta;
-  // tenta de novo algumas vezes indez de desistir na primeira falha
-  let chats
+  // client.getChats() serializa TODAS as conversas de uma vez só via Puppeteer.
+  // Com muitos contatos isso trava (Runtime.callFunctionOn timed out) e derruba
+  // o conector inteiro antes de sincronizar qualquer coisa. Em vez disso,
+  // buscamos a lista de contatos (mais leve) e abrimos cada conversa
+  // individualmente com getChatById(), com timeout próprio por conversa —
+  // se uma travar, só ela é pulada, o resto continua normalmente.
+  let contacts
   for (let attempt = 1; attempt <= 5; attempt++) {
     try {
-      chats = await client.getChats()
+      contacts = await withTimeout(client.getContacts(), 60000, 'getContacts')
       break
     } catch (err) {
-      console.error(`Tentativa ${attempt}/5 de getChats falhou:`, err?.message, '| tipo:', typeof err, '| detalhes:', JSON.stringify(err, Object.getOwnPropertyNames(err || {})))
+      console.error(`Tentativa ${attempt}/5 de getContacts falhou:`, err?.message)
       if (attempt === 5) throw err
       await new Promise((resolve) => setTimeout(resolve, attempt * 5000))
     }
   }
+
+  const candidates = contacts.filter((c) => !c.isGroup && !c.isMe && c.isWAContact)
   let done = 0
+  let skipped = 0
 
-  for (const chat of chats) {
+  for (const contact of candidates) {
     try {
-      if (chat.isGroup) continue // MVP: ignora grupos
+      const chat = await withTimeout(client.getChatById(contact.id._serialized), 30000, 'getChatById')
 
-      const contact = await chat.getContact()
       const contactRow = await upsertContact(contact)
 
       const labelNames = await getChatLabelNames(chat)
@@ -237,7 +253,7 @@ async function syncHistory() {
         await supabase.from('contacts').update({ wa_labels: labelNames }).eq('id', contactRow.id)
       }
 
-      const history = await chat.fetchMessages({ limit: 30 })
+      const history = await withTimeout(chat.fetchMessages({ limit: 30 }), 30000, 'fetchMessages')
       for (const msg of history) {
         if (!msg.body && !msg.hasMedia) continue
         // não baixa mídia na sincronização inicial (muitas conversas = trava o navegador interno);
@@ -270,14 +286,15 @@ async function syncHistory() {
       }
 
       done++
-      if (done % 10 === 0) console.log(`   ...${done}/${chats.length} conversas sincronizadas`)
+      if (done % 10 === 0) console.log(`   ...${done}/${candidates.length} conversas sincronizadas (${skipped} puladas)`)
       await new Promise((resolve) => setTimeout(resolve, 600))
     } catch (err) {
-      console.error('Erro sincronizando uma conversa:', err.message)
+      skipped++
+      console.error(`Erro sincronizando conversa de ${contact.id?._serialized}:`, err.message)
     }
   }
 
-  console.log(`✅ Sincronização inicial concluída: ${done} conversas.`)
+  console.log(`✅ Sincronização inicial concluída: ${done} conversas (${skipped} puladas).`)
 }
 
 client.on('auth_failure', async (msg) => {
